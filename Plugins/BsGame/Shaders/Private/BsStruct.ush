@@ -1,0 +1,152 @@
+#define BS_SCREEN_WIDTH 1920
+#define BS_SCREEN_HEIGHT 1080
+
+#define BS_INIT_LAND_HEIGHT 128
+#define BS_PLAYER_SIDE_FLOOR_WIDTH 600
+#define BS_ENEMY_SIDE_FLOOR_WIDTH 1000
+#define BS_ENEMY_MAX 1024
+#define BS_BULLET_MAX 65536
+#define BS_ENEMY_INETRVAL_MAX 240
+#define BS_ENEMY_INETRVAL_MIN 60
+
+#define BS_PLAYER_SPRITE_SIZE 64
+#define BS_PLAYER_CLIMB_HEIGHT 8
+#define BS_PLAYER_HIT_WIDTH 32
+#define BS_PLAYER_HIT_HEIGHT 50
+
+#define BS_ENEMY_SPRITE_SIZE 64
+#define BS_ENEMY_HIT_WIDTH 60
+#define BS_ENEMY_HIT_HEIGHT 50
+#define BS_ENEMY_CANON_ANGLE_MIN 20
+#define BS_ENEMY_CANON_ANGLE_MAX 40
+#define BS_ENEMY_CANON_HEIGHT 24
+#define BS_ENEMY_CANON_PIVOT float2(0, 28)
+#define BS_ENEMY_SHOOT_INTERVAL 30
+#define BS_ENEMY_SHOOT_INTERVAL_MAX 240
+#define BS_ENEMY_SHOOT_INTERVAL_MIN 30
+
+#define BS_BULLET_MIN_VELOCITY 5.0
+#define BS_BULLET_MAX_VELOCITY 8.0
+#define BS_BULLET_SIZE 5
+#define BS_BULLET_GRAVITY 0.03
+
+#define BS_BARRIER_RADIUS 32
+#define BS_BARRIER_WIDTH 54
+#define BS_BARRIER_SPEED 2.0
+#define BS_BARRIER_SHOOT_TIME 20
+#define BS_BARRIER_COOL_TIME 10
+
+#define BS_BOMB_TIME 20
+
+#define BS_ADDRESS_ENEMY_COUNT			(4 * 0)
+#define BS_ADDRESS_ENEMY_BULLET_COUNT	(4 * 1)
+#define BS_ADDRESS_RE_BULLET_COUNT		(4 * 2)
+#define BS_ADDRESS_BOMB_COUNT			(4 * 3)
+#define BS_ADDRESS_SCORE_COUNT			(4 * 4)
+#define BS_ADDRESS_ENEMY_CS_ARG			(0)
+#define BS_ADDRESS_ENEMY_BULLET_CS_ARG	(BS_ADDRESS_ENEMY_CS_ARG + 3)
+#define BS_ADDRESS_RE_BULLET_CS_ARG		(BS_ADDRESS_ENEMY_BULLET_CS_ARG + 3)
+#define BS_ADDRESS_BOMB_CS_ARG			(BS_ADDRESS_RE_BULLET_CS_ARG + 3)
+#define BS_ADDRESS_ENEMY_VS_ARG			(BS_ADDRESS_BOMB_CS_ARG + 3)
+#define BS_ADDRESS_ENEMY_BULLET_VS_ARG	(BS_ADDRESS_ENEMY_VS_ARG + 4)
+#define BS_ADDRESS_RE_BULLET_VS_ARG		(BS_ADDRESS_ENEMY_BULLET_VS_ARG + 4)
+#define BS_ADDRESS_BOMB_VS_ARG			(BS_ADDRESS_RE_BULLET_VS_ARG + 4)
+
+#define BS_SOUND_TITLE					0
+#define BS_SOUND_GAMEOVER				1
+#define BS_SOUND_SELECT					2
+#define BS_SOUND_SHOT					3
+#define BS_SOUND_BOMB					4
+#define BS_SOUND_REFLECT				5
+#define BS_SOUND_PUSH					6
+#define BS_SOUND_MAX					256
+
+#define BS_PI 3.1415926
+
+struct FGameState
+{
+	int CurrentState;
+	int NextState;
+	int RunningFrame;
+	int GameFrame;
+	int PlayerDead;
+	int Score;
+	int HiScore;
+	int EnemyInterval;
+};
+
+struct FPlayerState
+{
+	float2 Position;
+	float2 BarrierPosition;
+	float2 PrevBarrierPosition;
+	float FallSpeed;
+	float BarrierAngle;
+	float PrevBarrierAngle;
+	int BarrierShootTime;
+	int BarrierCoolTime;
+	int tmp;
+};
+
+struct FEnemyState
+{
+	float2 Position;
+	float TargetX;
+	float MoveX;
+	float ShootAngle;
+	int ShootInterval;
+	int State;
+	int tmp;
+};
+
+struct FBulletState
+{
+	float2 Position;
+	float2 Velocity;
+};
+
+struct FBombState
+{
+	float2 Position;
+	int Count;
+	int tmp;
+};
+
+int Orientation(float2 p, float2 q, float2 r)
+{
+	float val = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
+	if (abs(val) < 1e-4) return 0;
+	return (val > 0) ? 1 : -1;
+}
+bool DoIntersect(float2 p1, float2 q1, float2 p2, float2 q2)
+{
+	int o1 = Orientation(p1, q1, p2);
+	int o2 = Orientation(p1, q1, q2);
+	int o3 = Orientation(p2, q2, p1);
+	int o4 = Orientation(p2, q2, q1);
+	if (o1 != o2 && o3 != o4)
+	{
+		return true;
+	}
+	if (o1 == 0 && o2 == 0 && o3 == 0 && o4 == 0)
+	{
+		if (min(p1.x, q1.x) <= max(p2.x, q2.x) && min(p2.x, q2.x) <= max(p1.x, q1.x) &&
+			min(p1.y, q1.y) <= max(p2.y, q2.y) && min(p2.y, q2.y) <= max(p1.y, q1.y))
+				return true;
+	}
+	return false;
+}
+float2 Intersection(float2 p1, float2 q1, float2 p2, float2 q2)
+{
+	float a1 = q1.y - p1.y;
+	float b1 = p1.x - q1.x;
+	float c1 = a1 * p1.x + b1 * p1.y;
+
+	float a2 = q2.y - p2.y;
+	float b2 = p2.x - q2.x;
+	float c2 = a2 * p2.x + b2 * p2.y;
+
+	float InvDet = 1.0 / (a1 * b2 - a2 * b1);
+
+	return float2((b2 * c1 - b1 * c2) * InvDet, (a1 * c2 - a2 * c1) * InvDet);
+}

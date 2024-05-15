@@ -1,0 +1,602 @@
+#include "/Engine/Private/Common.ush"
+#include "BsStruct.ush"
+
+RWStructuredBuffer<FGameState> rwGameState;
+RWStructuredBuffer<FPlayerState> rwPlayerState;
+RWStructuredBuffer<uint> rwStage;
+
+ByteAddressBuffer rCount;
+RWByteAddressBuffer rwCount;
+RWStructuredBuffer<uint> rwArgument;
+
+StructuredBuffer<FEnemyState> rEnemys;
+RWStructuredBuffer<FEnemyState> rwEnemys;
+
+StructuredBuffer<FBulletState> rBullets;
+RWStructuredBuffer<FBulletState> rwBullets;
+
+StructuredBuffer<FBulletState> rReBullets;
+RWStructuredBuffer<FBulletState> rwReBullets;
+
+StructuredBuffer<FBombState> rBombs;
+RWStructuredBuffer<FBombState> rwBombs;
+
+StructuredBuffer<float> rRandom;
+RWByteAddressBuffer rwRandomCount;
+
+RWByteAddressBuffer rwSound;
+
+float LeftRightMove;
+float2 MousePos;
+int bPressAttack;
+
+float GetRandom()
+{
+	uint index;
+	rwRandomCount.InterlockedAdd(0, 1, index);
+	index = index % 65536;
+	return rRandom[index];
+}
+
+[numthreads(1, 1, 1)]
+void TickStartCS(uint2 dtid : SV_DispatchThreadID)
+{
+	FGameState Game = rwGameState[0];
+	Game.RunningFrame++;
+	if (Game.CurrentState == 1)
+	{
+		Game.GameFrame++;
+	}
+	rwGameState[0] = Game;
+	
+	// Argument for DispatchIndirect.
+	uint4 count = rCount.Load4(0);
+	rwArgument[BS_ADDRESS_ENEMY_CS_ARG + 0] = (count.x + 31) / 32;
+	rwArgument[BS_ADDRESS_ENEMY_CS_ARG + 1] = 1;
+	rwArgument[BS_ADDRESS_ENEMY_CS_ARG + 2] = 1;
+
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_CS_ARG + 0] = (count.y + 31) / 32;
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_CS_ARG + 1] = 1;
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_CS_ARG + 2] = 1;
+
+	rwArgument[BS_ADDRESS_RE_BULLET_CS_ARG + 0] = (count.z + 31) / 32;
+	rwArgument[BS_ADDRESS_RE_BULLET_CS_ARG + 1] = 1;
+	rwArgument[BS_ADDRESS_RE_BULLET_CS_ARG + 2] = 1;
+	
+	rwArgument[BS_ADDRESS_BOMB_CS_ARG + 0] = (count.w + 31) / 32;
+	rwArgument[BS_ADDRESS_BOMB_CS_ARG + 1] = 1;
+	rwArgument[BS_ADDRESS_BOMB_CS_ARG + 2] = 1;
+	
+	uint4 set = {0, 0, 0, 0};
+	rwCount.Store4(0, set);
+	rwCount.Store(BS_ADDRESS_SCORE_COUNT, 0);
+}
+
+[numthreads(1, 1, 1)]
+void TickEndCS(uint2 dtid : SV_DispatchThreadID)
+{
+	// Score
+	FGameState Game = rwGameState[0];
+	uint scoreCount;
+	rwCount.InterlockedExchange(BS_ADDRESS_SCORE_COUNT, 0, scoreCount);
+	if (Game.CurrentState == 1)
+	{
+		Game.Score += scoreCount * (1 + Game.GameFrame / 1800) * 100;
+		Game.HiScore = max(Game.HiScore, Game.Score);
+		rwGameState[0] = Game;
+	}
+	
+	// Argument for DrawIndirect.
+	uint4 count = rwCount.Load4(0);
+	count.x = min(count.x, BS_ENEMY_MAX);
+	count.y = min(count.y, BS_BULLET_MAX);
+	count.z = min(count.z, BS_BULLET_MAX);
+	count.w = min(count.w, BS_ENEMY_MAX);
+	rwCount.Store4(0, count);
+	
+	rwArgument[BS_ADDRESS_ENEMY_VS_ARG + 0] = 4;
+	rwArgument[BS_ADDRESS_ENEMY_VS_ARG + 1] = count.x * 2;
+	rwArgument[BS_ADDRESS_ENEMY_VS_ARG + 2] = 0;
+	rwArgument[BS_ADDRESS_ENEMY_VS_ARG + 3] = 0;
+
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_VS_ARG + 0] = 4;
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_VS_ARG + 1] = count.y;
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_VS_ARG + 2] = 0;
+	rwArgument[BS_ADDRESS_ENEMY_BULLET_VS_ARG + 3] = 0;
+
+	rwArgument[BS_ADDRESS_RE_BULLET_VS_ARG + 0] = 4;
+	rwArgument[BS_ADDRESS_RE_BULLET_VS_ARG + 1] = count.z;
+	rwArgument[BS_ADDRESS_RE_BULLET_VS_ARG + 2] = 0;
+	rwArgument[BS_ADDRESS_RE_BULLET_VS_ARG + 3] = 0;
+
+	rwArgument[BS_ADDRESS_BOMB_VS_ARG + 0] = 4;
+	rwArgument[BS_ADDRESS_BOMB_VS_ARG + 1] = count.w;
+	rwArgument[BS_ADDRESS_BOMB_VS_ARG + 2] = 0;
+	rwArgument[BS_ADDRESS_BOMB_VS_ARG + 3] = 0;
+}
+
+
+[numthreads(1, 1, 1)]
+void TickPlayerCS(uint2 dtid : SV_DispatchThreadID)
+{
+	FGameState gs = rwGameState[0];
+
+	if (gs.CurrentState == 0)
+	{
+		if (bPressAttack)
+		{
+			gs.NextState = 1;
+			rwGameState[0] = gs;
+		}
+		return;
+	}
+	else if (gs.CurrentState == 2)
+	{
+		if (bPressAttack)
+		{
+			gs.NextState = 0;
+			rwGameState[0] = gs;
+		}
+		return;
+	}
+	
+	if (gs.PlayerDead == 1)
+	{
+		return;
+	}
+	
+	FPlayerState ps = rwPlayerState[0];
+
+	// compute new pos.
+	float x = ps.Position.x + LeftRightMove;
+	x = max(x, BS_PLAYER_SPRITE_SIZE / 2);
+	float y = ps.Position.y - (BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT);
+	// floor check.
+	float fy = BS_SCREEN_HEIGHT;
+	float pleft = x - BS_PLAYER_HIT_WIDTH / 2;
+	float pright = x + BS_PLAYER_HIT_WIDTH / 2;
+	for (int xx = max(0, pleft); xx < min(BS_SCREEN_WIDTH, pright); xx++)
+	{
+		for (int yy = max(0, y - BS_PLAYER_CLIMB_HEIGHT - 1); yy < BS_INIT_LAND_HEIGHT; yy++)
+		{
+			int address = yy * BS_SCREEN_WIDTH + xx;
+			uint floor = rwStage[address];
+			if (floor)
+			{
+				fy = min(fy, yy);
+				break;
+			}
+		}
+	}
+	// move.
+	if (fy > y)
+	{
+		ps.Position.x = x;
+		ps.Position.y += ps.FallSpeed;
+		ps.FallSpeed = min(ps.FallSpeed + 1.0, 4.0);
+	}
+	else if (fy + BS_PLAYER_CLIMB_HEIGHT >= y)
+	{
+		ps.Position.x = x;
+		ps.Position.y = (BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT) + fy;
+		ps.FallSpeed = 0.0;
+	}
+	else if (ps.FallSpeed > 0)
+	{
+		ps.Position.y += ps.FallSpeed;
+		ps.FallSpeed = min(ps.FallSpeed + 1.0, 4.0);
+	}
+	if (ps.Position.y >= BS_SCREEN_HEIGHT + BS_PLAYER_SPRITE_SIZE)
+	{
+		gs.PlayerDead = 1;
+		gs.NextState = 2;
+		rwGameState[0] = gs;
+	}
+
+	// barrier.
+	ps.PrevBarrierPosition = ps.BarrierPosition;
+	ps.PrevBarrierAngle = ps.BarrierAngle;
+	if (ps.BarrierCoolTime > 0)
+	{
+		ps.BarrierCoolTime--;
+	}
+	if (ps.BarrierShootTime > 0)
+	{
+		float2 dir = float2(0, -1);
+		float sa = sin(ps.BarrierAngle);
+		float ca = cos(ps.BarrierAngle);
+		dir = float2(dot(dir, float2(ca, sa)), dot(dir, float2(-sa, ca)));
+		ps.BarrierPosition += dir * BS_BARRIER_SPEED;
+		ps.BarrierShootTime--;
+		if (ps.BarrierShootTime <= 0)
+		{
+			ps.BarrierCoolTime = BS_BARRIER_COOL_TIME;
+		}
+	}
+	else
+	{
+		float2 center = ps.Position.xy - float2(0, BS_PLAYER_HIT_HEIGHT / 2);
+		float2 mouseDir = MousePos - center;
+		ps.BarrierAngle = atan2(-mouseDir.x, -mouseDir.y);
+		ps.BarrierAngle = clamp(ps.BarrierAngle, -BS_PI * 0.5, BS_PI * 0.5);
+		float2 pos = float2(0, -BS_BARRIER_RADIUS);
+		float sa = sin(ps.BarrierAngle);
+		float ca = cos(ps.BarrierAngle);
+		pos = float2(dot(pos, float2(ca, sa)), dot(pos, float2(-sa, ca)));
+		pos += center;
+		ps.BarrierPosition = pos;
+		if (bPressAttack)
+		{
+			ps.BarrierShootTime = BS_BARRIER_SHOOT_TIME;
+
+			uint v;
+			rwSound.InterlockedAdd(BS_SOUND_PUSH * 4, 1, v);
+		}
+	}
+
+	rwPlayerState[0] = ps;
+}
+
+[numthreads(1, 1, 1)]
+void TickAddEnemyCS(uint2 dtid : SV_DispatchThreadID)
+{
+	FGameState Game = rwGameState[0];
+	Game.EnemyInterval--;
+
+	if (Game.EnemyInterval > 0)
+	{}
+	else
+	{
+		int GenCount = 1;
+		const int OneMinutes = 3600;
+		int ShootInterval = BS_ENEMY_SHOOT_INTERVAL_MAX;
+		if (Game.GameFrame > OneMinutes)
+		{
+			GenCount = 3;
+			float rate = saturate(float(Game.GameFrame - OneMinutes) / float(OneMinutes + OneMinutes));
+			Game.EnemyInterval = int(lerp(float(BS_ENEMY_INETRVAL_MAX), float(BS_ENEMY_INETRVAL_MIN), rate));
+			ShootInterval = int(lerp(float(BS_ENEMY_SHOOT_INTERVAL_MAX), float(BS_ENEMY_SHOOT_INTERVAL_MIN), rate));
+		}
+		else
+		{
+			Game.EnemyInterval = BS_ENEMY_INETRVAL_MAX;
+		}
+
+		for (int i = 0; i < GenCount; i++)
+		{
+			uint index;
+			rwCount.InterlockedAdd(BS_ADDRESS_ENEMY_COUNT, 1, index);
+			[branch]
+			if (index >= BS_ENEMY_MAX)
+			{
+				break;
+			}
+
+			FEnemyState es = (FEnemyState)0;
+			es.Position.x = BS_SCREEN_WIDTH + 32;
+			es.Position.y = BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT;
+			es.TargetX = lerp(BS_SCREEN_WIDTH - BS_ENEMY_SIDE_FLOOR_WIDTH + 128, BS_SCREEN_WIDTH - 256, GetRandom());
+			es.MoveX = lerp(1.0, 3.0, GetRandom());
+			es.ShootAngle = lerp(BS_PI * BS_ENEMY_CANON_ANGLE_MIN / 180.0, BS_PI * BS_ENEMY_CANON_ANGLE_MAX / 180.0, GetRandom());
+			es.ShootInterval = ShootInterval;
+			es.State = 0;
+	
+			rwEnemys[index] = es;
+		}
+	}
+
+	rwGameState[0] = Game;
+}
+
+[numthreads(32, 1, 1)]
+void TickEnemyCS(uint2 dtid : SV_DispatchThreadID)
+{
+	uint count = rCount.Load(BS_ADDRESS_ENEMY_COUNT);
+	uint index = dtid.x;
+	if (index >= count)
+	{
+		return;
+	}
+	
+	FEnemyState es = rEnemys[index];
+	if (es.State == 1)
+	{
+		// enemy dead.
+		uint v;
+		rwSound.InterlockedAdd(BS_SOUND_BOMB * 4, 1, v);
+
+		uint c;
+		rwCount.InterlockedAdd(BS_ADDRESS_SCORE_COUNT, 1, c);
+		
+		FBombState bs = (FBombState)0;
+		bs.Position = es.Position;
+		bs.Count = BS_BOMB_TIME;
+		rwCount.InterlockedAdd(BS_ADDRESS_BOMB_COUNT, 1, index);
+		rwBombs[index] = bs;
+		return;
+	}
+
+	// move.
+	if (es.Position.x > es.TargetX)
+	{
+		es.Position.x -= es.MoveX;
+	}
+
+	// shoot bullet.
+	es.ShootInterval--;
+	if (es.ShootInterval <= 0)
+	{
+		// generate bullet.
+		const int OneMinutes = 3600;
+		int Frame = rwGameState[0].GameFrame;
+		float rate = saturate(float(Frame - OneMinutes) / float(OneMinutes + OneMinutes));
+		es.ShootInterval = int(lerp(float(BS_ENEMY_SHOOT_INTERVAL_MAX), float(BS_ENEMY_SHOOT_INTERVAL_MIN), rate));
+
+		FBulletState bs = (FBulletState)0;
+		bs.Position = es.Position - BS_ENEMY_CANON_PIVOT;
+		float sa = sin(es.ShootAngle);
+		float ca = cos(es.ShootAngle);
+		float2 dir = float2(-sa, -ca);
+		bs.Velocity = dir * lerp(BS_BULLET_MIN_VELOCITY, BS_BULLET_MAX_VELOCITY, GetRandom());
+
+		uint bindex;
+		rwCount.InterlockedAdd(BS_ADDRESS_ENEMY_BULLET_COUNT, 1, bindex);
+		[branch]
+		if (bindex < BS_BULLET_MAX)
+		{
+			rwBullets[bindex] = bs;
+		}
+
+		uint v;
+		rwSound.InterlockedAdd(BS_SOUND_SHOT * 4, 1, v);
+	}
+
+	// store to new list.
+	rwCount.InterlockedAdd(BS_ADDRESS_ENEMY_COUNT, 1, index);
+	rwEnemys[index] = es;
+}
+
+bool TestHitStage(float2 Pos, float2 PrevPos)
+{
+	float f0 = BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT;
+	if (Pos.y >= f0)
+	{
+		float2 dp = Pos - PrevPos;
+		float dx = dp.x / dp.y;
+		float sx = PrevPos.x;
+		float sy = PrevPos.y - f0;
+		float ey = Pos.y - f0;
+		if (sy < 0)
+		{
+			sx += dx * -sy;
+		}
+		for (; sy <= ey; sx += dx, sy += 1.0)
+		{
+			int2 pix = int2(sx, sy);
+			if (pix.x < 0 || pix.x >= BS_SCREEN_WIDTH) continue;
+			int index = pix.y * BS_SCREEN_WIDTH + pix.x;
+			uint stage = rwStage[index];
+			if (stage == 0)
+			{
+				continue;
+			}
+			if (stage == 1)
+			{
+				int deleteWidth = 5;
+				for (int y = max(pix.y - deleteWidth, 0); y <= min(pix.y + deleteWidth, BS_INIT_LAND_HEIGHT - 1); y++)
+				{
+					for (int x = max(pix.x - deleteWidth, 0); x <= pix.x + deleteWidth; x++)
+					{
+						int idx = y * BS_SCREEN_WIDTH + x;
+						rwStage[idx] = 0;
+					}
+				}
+			}
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool TestHitBox(float2 Point, float2 Center, float2 Size)
+{
+	float2 Half = Size * 0.5;
+	float2 D = abs(Point - Center);
+	return all(D < Half);
+}
+
+[numthreads(32, 1, 1)]
+void TickEnemyBulletCS(uint2 dtid : SV_DispatchThreadID)
+{
+	uint count = rCount.Load(BS_ADDRESS_ENEMY_BULLET_COUNT);
+	uint index = dtid.x;
+	if (index >= count)
+	{
+		return;
+	}
+	
+	FBulletState bs = rBullets[index];
+	float2 PrevPos = bs.Position;
+	// out of area.
+	if (PrevPos.x < 0 || PrevPos.y > BS_SCREEN_HEIGHT)
+	{
+		return;
+	}
+
+	// move.
+	bs.Position += bs.Velocity;
+	bs.Velocity.y += BS_BULLET_GRAVITY;
+
+	// barrier hit check.
+	FGameState Game = rwGameState[0];
+	FPlayerState Player = rwPlayerState[0];
+	if (Game.PlayerDead == 0 && Player.BarrierCoolTime == 0)
+	{
+		float2 bp1, bp2, bp3, bp4;
+		{
+			bp1 = bp3 = float2(-BS_BARRIER_WIDTH * 0.5, 0);
+			bp2 = bp4 = float2(BS_BARRIER_WIDTH * 0.5, 0);
+
+			float sa = sin(Player.BarrierAngle);
+			float ca = cos(Player.BarrierAngle);
+			bp1 = float2(dot(bp1, float2(ca, sa)), dot(bp1, float2(-sa, ca))) + Player.BarrierPosition;
+			bp2 = float2(dot(bp2, float2(ca, sa)), dot(bp2, float2(-sa, ca))) + Player.BarrierPosition;
+
+			sa = sin(Player.PrevBarrierAngle);
+			ca = cos(Player.PrevBarrierAngle);
+			bp3 = float2(dot(bp3, float2(ca, sa)), dot(bp3, float2(-sa, ca))) + Player.PrevBarrierPosition;
+			bp4 = float2(dot(bp4, float2(ca, sa)), dot(bp4, float2(-sa, ca))) + Player.PrevBarrierPosition;
+		}
+		bool bIntersect = false;
+		float2 crossPos;
+		if (DoIntersect(bp1, bp2, PrevPos, bs.Position))
+		{
+			// hit!
+			crossPos = Intersection(bp1, bp2, PrevPos, bs.Position);
+			bIntersect = true;
+		}
+		else if (DoIntersect(bp3, bp4, PrevPos, bs.Position))
+		{
+			// hit!
+			crossPos = Intersection(bp3, bp4, PrevPos, bs.Position);
+			bIntersect = true;
+		}
+		if (bIntersect)
+		{
+			uint reindex;
+			rwCount.InterlockedAdd(BS_ADDRESS_RE_BULLET_COUNT, 1, reindex);
+			if (reindex < BS_BULLET_MAX)
+			{
+				FBulletState ReBul = (FBulletState)0;
+				ReBul.Position = bs.Position;
+				float sa = sin(Player.BarrierAngle);
+				float ca = cos(Player.BarrierAngle);
+				float2 bdir = float2(-sa, -ca);
+				float vel = length(bs.Velocity);
+				float redir = -normalize(bs.Velocity);
+				if (Player.BarrierShootTime > 0)
+				{
+					ReBul.Velocity = normalize(bdir + redir * 0.5) * vel;
+				}
+				else
+				{
+					ReBul.Velocity = normalize(bdir + redir) * (vel / 3.0);
+				}
+				rwReBullets[reindex] = ReBul;
+
+				uint v;
+				rwSound.InterlockedAdd(BS_SOUND_REFLECT * 4, 1, v);
+			}
+			return;
+		}
+	}
+	
+	// stage hit check.
+	if (TestHitStage(bs.Position, PrevPos))
+	{
+		return;
+	}
+
+	// player hit check.
+	if (Game.PlayerDead == 0)
+	{
+		float2 PlayerCenter = Player.Position + float2(0, -BS_PLAYER_HIT_HEIGHT / 2);
+		float2 PlayerSize = float2(BS_PLAYER_HIT_WIDTH, BS_PLAYER_HIT_HEIGHT);
+		if (TestHitBox(bs.Position, PlayerCenter, PlayerSize))
+		{
+			Game.PlayerDead = 1;
+			Game.NextState = 2;
+			rwGameState[0] = Game;
+
+			FBombState bs = (FBombState)0;
+			bs.Position = Player.Position;
+			bs.Count = BS_BOMB_TIME;
+			rwCount.InterlockedAdd(BS_ADDRESS_BOMB_COUNT, 1, index);
+			rwBombs[index] = bs;
+			
+			uint v;
+			rwSound.InterlockedAdd(BS_SOUND_BOMB * 4, 1, v);
+
+			return;
+		}
+	}
+
+	// store to new list.
+	rwCount.InterlockedAdd(BS_ADDRESS_ENEMY_BULLET_COUNT, 1, index);
+	rwBullets[index] = bs;
+}
+
+[numthreads(32, 1, 1)]
+void TickReBulletCS(uint2 dtid : SV_DispatchThreadID)
+{
+	uint count = rCount.Load(BS_ADDRESS_RE_BULLET_COUNT);
+	uint index = dtid.x;
+	if (index >= count)
+	{
+		return;
+	}
+	
+	FBulletState bs = rReBullets[index];
+	float2 PrevPos = bs.Position;
+	// out of area.
+	if (PrevPos.x > BS_SCREEN_WIDTH || PrevPos.y > BS_SCREEN_HEIGHT)
+	{
+		return;
+	}
+
+	// move.
+	bs.Position += bs.Velocity;
+	bs.Velocity.y += BS_BULLET_GRAVITY;
+
+	// stage hit check.
+	if (TestHitStage(bs.Position, PrevPos))
+	{
+		return;
+	}
+
+	// enemy hit check.
+	uint EnemyCount = rCount.Load(BS_ADDRESS_ENEMY_COUNT);
+	bool bEnemyHit = false;
+	for (uint e = 0; e < EnemyCount; e++)
+	{
+		FEnemyState Enemy = rwEnemys[e];
+		float2 EnemyCenter = Enemy.Position + float2(0, -BS_ENEMY_HIT_HEIGHT / 2);
+		float2 EnemySize = float2(BS_ENEMY_HIT_WIDTH, BS_ENEMY_HIT_HEIGHT);
+		if (TestHitBox(bs.Position, EnemyCenter, EnemySize))
+		{
+			rwEnemys[e].State = 1;
+			bEnemyHit = true;
+		}
+	}
+	if (bEnemyHit)
+	{
+		return;
+	}
+
+	// store to new list.
+	rwCount.InterlockedAdd(BS_ADDRESS_RE_BULLET_COUNT, 1, index);
+	rwReBullets[index] = bs;
+}
+
+[numthreads(32, 1, 1)]
+void TickBombCS(uint2 dtid : SV_DispatchThreadID)
+{
+	uint count = rCount.Load(BS_ADDRESS_BOMB_COUNT);
+	uint index = dtid.x;
+	if (index >= count)
+	{
+		return;
+	}
+	
+	FBombState bs = rBombs[index];
+	bs.Count--;
+	if (bs.Count == 0)
+	{
+		return;
+	}
+
+	// store to new list.
+	rwCount.InterlockedAdd(BS_ADDRESS_BOMB_COUNT, 1, index);
+	rwBombs[index] = bs;
+}

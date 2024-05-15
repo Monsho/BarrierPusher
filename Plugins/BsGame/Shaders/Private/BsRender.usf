@@ -1,0 +1,383 @@
+﻿#include "/Engine/Private/Common.ush"
+#include "BsStruct.ush"
+
+StructuredBuffer<FGameState> rGameState;
+StructuredBuffer<FPlayerState> rPlayerState;
+StructuredBuffer<uint> rStage;
+StructuredBuffer<FEnemyState> rEnemys;
+StructuredBuffer<FBulletState> rBullets;
+StructuredBuffer<FBombState> rBombs;
+Texture2D tSprite;
+SamplerState SpriteSampler;
+float2 MousePos;
+float4 Color;
+
+float4 ComputeSpriteVertex(uint Index, float2 Pos, float2 Size, float2 Pivot, float Angle)
+{
+	float x = (Index & 0x01) ? 1.0 : -1.0;
+	float y = (Index >> 0x01) ? 1.0 : -1.0;
+	float2 v = float2(x, y) * Size * 0.5;
+	v -= Pivot;
+	float sa = sin(Angle);
+	float ca = cos(Angle);
+	x = dot(v, float2(ca, sa)) + Pos.x;
+	y = dot(v, float2(-sa, ca)) + Pos.y;
+
+	x = (x / BS_SCREEN_WIDTH) * 2.0 - 1.0;
+	y = (y / BS_SCREEN_HEIGHT) * -2.0 + 1.0;
+	return float4(x, y, 0, 1);
+}
+
+
+void FullScreenVS(
+	in uint GlobalVertexId : SV_VertexID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+
+	OutUV = float2(u, v) * 2.0;
+	OutPosition.x = u * 4.0 - 1.0;
+	OutPosition.y = v * -4.0 + 1.0;
+	OutPosition.z = 0.0;
+	OutPosition.w = 1.0;
+}
+
+void RenderStagePS(
+	in float2 UV : TEXCOORD0,
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0
+	)
+{
+	const float4 kEmptyStage = {0, 0, 0, 1};
+	const float4 kFloorColor = {0.5, 0.5, 0.5, 1};
+
+	int2 PixPos = int2(SvPosition.xy);
+	if (PixPos.y < BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT)
+	{
+		OutColor = kEmptyStage;
+	}
+	else
+	{
+		int y = PixPos.y - (BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT);
+		int address = y * BS_SCREEN_WIDTH + PixPos.x;
+		uint s = rStage[address];
+		OutColor = (s != 0) ? kFloorColor : kEmptyStage;
+	}
+}
+
+void PlayerSpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+	OutUV = float2(u, v);
+
+	FGameState Game = rGameState[0];
+	if (Game.PlayerDead || Game.CurrentState != 1)
+	{
+		OutPosition = 0.0;
+		return;
+	}
+
+	FPlayerState State = rPlayerState[0];
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		State.Position,
+		float2(BS_PLAYER_SPRITE_SIZE, BS_PLAYER_SPRITE_SIZE),
+		float2(0.0, BS_PLAYER_SPRITE_SIZE / 2),
+		0.0);
+}
+
+void BarrierSpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+	OutUV = float2(u, v);
+
+	FGameState Game = rGameState[0];
+	FPlayerState State = rPlayerState[0];
+	if (Game.PlayerDead || State.BarrierCoolTime > 0)
+	{
+		OutPosition = 0.0;
+		return;
+	}
+	
+	float2 pos;
+	float angle;
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		State.BarrierPosition,
+		float2(BS_BARRIER_WIDTH, 2),
+		float2(0.0, 0.0),
+		State.BarrierAngle);
+}
+
+void MouseSpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+
+	OutUV = float2(u, v);
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		MousePos,
+		float2(4, 4),
+		float2(0, 0),
+		0);
+}
+
+void EnemySpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01) * 0.5;
+	float v = float(GlobalVertexId >> 0x01);
+	uint index = GlobalInstanceId / 2;
+	uint type = GlobalInstanceId & 0x01;
+	FEnemyState State = rEnemys[index];
+
+	float2 pos = State.Position;
+	float2 pivot = float2(0.0, BS_ENEMY_SPRITE_SIZE / 2);
+	float angle = 0.0;
+	if (type == 0)
+	{
+		pos = pos + float2(0, -BS_ENEMY_CANON_HEIGHT);
+		pivot = BS_ENEMY_CANON_PIVOT;
+		angle = State.ShootAngle;
+	}
+	
+	OutUV = float2(type == 1 ? u : 0.5 + u, v);
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		float2(BS_ENEMY_SPRITE_SIZE, BS_ENEMY_SPRITE_SIZE),
+		pivot,
+		angle);
+}
+
+void BulletSpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01) * 0.5;
+	float v = float(GlobalVertexId >> 0x01);
+	uint index = GlobalInstanceId;
+	FBulletState State = rBullets[index];
+
+	OutUV = float2(u, v);
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		State.Position,
+		float2(BS_BULLET_SIZE, BS_BULLET_SIZE),
+		float2(0, 0),
+		0);
+}
+
+void BombSpriteVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+	FBombState State = rBombs[GlobalInstanceId];
+
+	OutUV = float2(u, v);
+
+	if (State.Count & 0x01)
+	{
+		OutPosition = 0.0;
+		return;
+	}
+
+	float2 pos = State.Position;
+	float2 pivot = float2(0.0, BS_ENEMY_SPRITE_SIZE / 2);
+	float angle = 0.0;
+	
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		float2(BS_ENEMY_SPRITE_SIZE, BS_ENEMY_SPRITE_SIZE),
+		pivot,
+		angle);
+}
+
+void TitleVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01) * 0.5;
+	uint type = GlobalInstanceId;
+	FGameState Game = rGameState[0];
+
+	OutUV = float2(u, type == 0 ? v : v + 0.5);
+
+	if (Game.CurrentState != 0)
+	{
+		OutPosition = 0.0;
+		return;
+	}
+
+	float2 pos;
+	float2 size = float2(256, 128);
+	if (type == 1)
+	{
+		if ((Game.RunningFrame / 30) & 0x01)
+		{
+			OutPosition = 0.0;
+			return;
+		}
+		else
+		{
+			pos = float2(BS_SCREEN_WIDTH / 2, BS_SCREEN_HEIGHT / 2 + 108);
+			size *= 2;
+		}
+	}
+	else
+	{
+		pos = float2(BS_SCREEN_WIDTH / 2, BS_SCREEN_HEIGHT / 2 - 200);
+		size *= 4;
+	}
+
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		size,
+		float2(0, 0),
+		0);
+}
+
+void GameOverVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01);
+	FGameState Game = rGameState[0];
+
+	OutUV = float2(u, v);
+
+	if (Game.CurrentState != 2)
+	{
+		OutPosition = 0.0;
+		return;
+	}
+
+	float2 pos = float2(BS_SCREEN_WIDTH / 2, BS_SCREEN_HEIGHT / 2);
+	float2 size = float2(512, 256) * 2;
+
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		size,
+		float2(0, 0),
+		0);
+}
+
+void ScoreLabelVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	const float kOnePerEight = 1.0 / 8.0;
+	float u = float(GlobalVertexId & 0x01);
+	float v = float(GlobalVertexId >> 0x01) * kOnePerEight + kOnePerEight * 2.0;
+	uint type = GlobalInstanceId;
+	FGameState Game = rGameState[0];
+
+	OutUV = float2(u, type == 0 ? v : v + kOnePerEight);
+
+	const float kVSize = 32.0;
+	float2 pos = float2(256, 48 + kVSize * float(type));
+	float2 size = float2(kVSize / kOnePerEight, kVSize);
+
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		size,
+		float2(0, 0),
+		0);
+}
+
+void ScoreVS(
+	in uint GlobalVertexId : SV_VertexID,
+	in uint GlobalInstanceId : SV_InstanceID,
+	out float2 OutUV : TEXCOORD0,
+	out float4 OutPosition : SV_POSITION
+	)
+{
+	const float kOnePerEight = 1.0 / 8.0;
+	float u = float(GlobalVertexId & 0x01) * kOnePerEight;
+	float v = float(GlobalVertexId >> 0x01) * kOnePerEight;
+	uint kind = GlobalInstanceId / 7;
+	uint digit = GlobalInstanceId % 7;
+	FGameState Game = rGameState[0];
+	int Score = kind == 0 ? Game.HiScore : Game.Score;
+
+	int Number = (Score / pow(10, digit)) % 10;
+	u += float(Number % 8) * kOnePerEight;
+	v += float(Number / 8) * kOnePerEight;
+	
+	OutUV = float2(u, v);
+
+	const float kUSize = 16.0;
+	const float kVSize = 32.0;
+	float2 pos = float2(256 + 128 - kUSize * float(digit), 48 + kVSize * float(kind));
+	float2 size = float2(kVSize, kVSize);
+
+	OutPosition = ComputeSpriteVertex(GlobalVertexId,
+		pos,
+		size,
+		float2(0, 0),
+		0);
+}
+
+void TextureSpritePS(
+	in float2 UV : TEXCOORD0,
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0
+	)
+{
+	OutColor = Texture2DSampleLevel(tSprite, SpriteSampler, UV, 0);
+}
+
+void AlphaSpritePS(
+	in float2 UV : TEXCOORD0,
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0
+	)
+{
+	OutColor.rgb = Color.rgb;
+	OutColor.a = Texture2DSampleLevel(tSprite, SpriteSampler, UV, 0).r;
+}
+
+void ColorSpritePS(
+	in float2 UV : TEXCOORD0,
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0
+	)
+{
+	OutColor = Color;
+}

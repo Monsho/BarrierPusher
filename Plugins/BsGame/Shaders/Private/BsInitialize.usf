@@ -1,0 +1,127 @@
+#include "/Engine/Private/Common.ush"
+#include "BsStruct.ush"
+
+RWStructuredBuffer<FGameState> rwGameState;
+RWStructuredBuffer<FPlayerState> rwPlayerState;
+RWStructuredBuffer<uint> rwStage;
+RWByteAddressBuffer rwCount0;
+RWByteAddressBuffer rwCount1;
+RWByteAddressBuffer rwRandomCount;
+RWByteAddressBuffer rwSound;
+
+// initialize game.
+[numthreads(1, 1, 1)]
+void InitGameCS(uint2 dtid : SV_DispatchThreadID)
+{
+	// game state.
+	FGameState gs = (FGameState)0;
+	gs.CurrentState = -1; gs.NextState = 0;
+	gs.RunningFrame = gs.GameFrame = 0;
+	gs.PlayerDead = 0;
+	gs.Score = gs.HiScore = 0;
+	gs.EnemyInterval = BS_ENEMY_INETRVAL_MAX;
+	rwGameState[0] = gs;
+
+	// player state.
+	FPlayerState ps = (FPlayerState)0;
+	ps.Position.x = 128.0;
+	ps.Position.y = BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT;
+	ps.FallSpeed = 0;
+	ps.BarrierAngle = 0.0;
+	ps.PrevBarrierAngle = 0.0;
+	ps.BarrierPosition = 0.0;
+	ps.PrevBarrierPosition = 0.0;
+	ps.BarrierShootTime = 0;
+	ps.BarrierCoolTime = 0;
+	rwPlayerState[0] = ps;
+
+	// stage floor.
+	for (int y = 0; y < BS_INIT_LAND_HEIGHT; y++)
+	{
+		for (int x = 0; x < BS_SCREEN_WIDTH; x++)
+		{
+			int address = y * BS_SCREEN_WIDTH + x;
+			bool bPFloor = x < BS_PLAYER_SIDE_FLOOR_WIDTH;
+			bool bEFloor = (BS_SCREEN_WIDTH - BS_ENEMY_SIDE_FLOOR_WIDTH) <= x;
+			rwStage[address] = bPFloor ? 1 : (bEFloor ? 2 : 0);
+		}
+	}
+
+	// counts.
+	uint4 value = 0;
+	rwCount0.Store4(0, value);
+	rwCount1.Store4(0, value);
+	rwRandomCount.Store(0, 0);
+}
+
+// game state check and parameter initialize.
+[numthreads(1, 1, 1)]
+void StartGameCS(uint2 dtid : SV_DispatchThreadID)
+{
+	// clear sound request.
+	uint4 sound = 0;
+	rwSound.Store4(0, sound);
+	rwSound.Store4(16, sound);
+
+	// game state settings.
+	FGameState gs = rwGameState[0];
+	if (gs.CurrentState == gs.NextState)
+	{
+		// no state change.
+		return;
+	}
+	gs.CurrentState = gs.NextState;
+	if (gs.CurrentState != 1)
+	{
+		if (gs.CurrentState == 0)
+		{
+			// play title sound.
+			rwSound.Store(BS_SOUND_TITLE * 4, 1);
+		}
+		else if (gs.CurrentState == 2)
+		{
+			// play game over sound.
+			rwSound.Store(BS_SOUND_GAMEOVER * 4, 1);
+		}
+		rwGameState[0] = gs;
+		return;
+	}
+	else
+	{
+		rwSound.Store(BS_SOUND_SELECT * 4, 1);
+	}
+	gs.PlayerDead = 0;
+	gs.Score = 0;
+	gs.GameFrame = 0;
+	gs.EnemyInterval = BS_ENEMY_INETRVAL_MAX;
+	rwGameState[0] = gs;
+
+	// player state settings.
+	FPlayerState ps = (FPlayerState)0;
+	ps.Position.x = 128.0;
+	ps.Position.y = BS_SCREEN_HEIGHT - BS_INIT_LAND_HEIGHT;
+	ps.FallSpeed = 0;
+	ps.BarrierAngle = 0.0;
+	ps.PrevBarrierAngle = 0.0;
+	ps.BarrierPosition = 0.0;
+	ps.PrevBarrierPosition = 0.0;
+	ps.BarrierShootTime = 0;
+	ps.BarrierCoolTime = 0;
+	rwPlayerState[0] = ps;
+
+	// stage floor initialize.
+	for (int y = 0; y < BS_INIT_LAND_HEIGHT; y++)
+	{
+		for (int x = 0; x < BS_SCREEN_WIDTH; x++)
+		{
+			int address = y * BS_SCREEN_WIDTH + x;
+			bool bPFloor = x < BS_PLAYER_SIDE_FLOOR_WIDTH;
+			bool bEFloor = (BS_SCREEN_WIDTH - BS_ENEMY_SIDE_FLOOR_WIDTH) <= x;
+			rwStage[address] = bPFloor ? 1 : (bEFloor ? 2 : 0);
+		}
+	}
+
+	uint4 value = 0;
+	rwCount0.Store4(0, value);
+	rwCount1.Store4(0, value);
+}
